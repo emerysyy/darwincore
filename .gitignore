@@ -1,0 +1,65 @@
+# ========================================
+# DarwinCore .gitignore
+# ========================================
+
+# Build directories
+build/
+build_export/
+cmake-build-*/
+
+# IDE specific files
+.codebuddy/
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Xcode
+*.xcodeproj/
+*.xcworkspace/
+xcuserdata/
+DerivedData/
+
+# CMake generated files
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+install_manifest.txt
+compile_commands.json
+.cmake/
+
+# Generated binaries and libraries
+*.dylib
+*.so
+*.a
+*.lib
+*.dll
+*.exe
+
+# Test executables
+test_*
+*_test
+
+# Temporary files
+*.tmp
+*.bak
+*.log
+
+# Package files
+*.tar.gz
+*.zip
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.Python
+
+# Package Manager
+node_modules/
+package-lock.json
+
+# Documentation build
+docs/_build/

@@ -1,0 +1,9 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(./server_client_test:*)",
+      "Bash(make:*)",
+      "Bash(1)"
+    ]
+  }
+}
