@@ -70,6 +70,20 @@ struct SocketConfiguration {
   /// 默认接收缓冲区大小
   static constexpr size_t kDefaultReceiveBufferSize = 8192;
 
+  // ============ 背压控制配置 ============
+
+  /// WorkerPool 队列最大容量（0 = 无限制）
+  static constexpr size_t kDefaultMaxQueueSize = 10000;
+
+  /// 发送缓冲区高水位（4MB）- 超过时触发背压
+  static constexpr size_t kDefaultSendBufferHighWaterMark = 4 * 1024 * 1024;
+
+  /// 发送缓冲区低水位（2MB）- 低于此时恢复读取
+  static constexpr size_t kDefaultSendBufferLowWaterMark = 2 * 1024 * 1024;
+
+  /// 发送缓冲区最大容量（16MB）- 防止内存耗尽
+  static constexpr size_t kDefaultSendBufferMaxCapacity = 16 * 1024 * 1024;
+
   /**
    * @brief 默认构造函数
    *

@@ -1,10 +1,10 @@
 //
 // DarwinCore Network Module
-// IOMonitor - IO 事件监控封装
+// IOMonitor - IO 事件监控封装（macOS kqueue）
 //
 // Description:
-//   封装 kqueue/epoll 系统调用，提供跨平台的 IO 事件监控接口
-//   macOS 使用 kqueue，Linux 使用 epoll
+//   封装 kqueue 系统调用，提供 IO 事件监控接口。
+//   仅支持 macOS/BSD 平台。
 //
 // Author: DarwinCore Network Team
 // Date: 2026
@@ -16,13 +16,7 @@
 #include <cstdint>
 #include <cstring>
 
-#if defined(__APPLE__) || defined(__FreeBSD__)
 #include <sys/event.h>
-#define USE_KQUEUE 1
-#else
-#include <sys/epoll.h>
-#define USE_EPOLL 1
-#endif
 
 namespace darwincore {
 namespace network {
@@ -30,13 +24,11 @@ namespace network {
 /**
  * @brief IO 监控器封装类（内部使用）
  *
- * 提供跨平台的 IO 事件监控接口：
- * - macOS/FreeBSD: 使用 kqueue
- * - Linux: 使用 epoll
+ * 提供 macOS kqueue 的 IO 事件监控接口。
  *
  * 用途：
  *   - 监控文件描述符的可读/可写事件
- *   - 封装底层系统调用细节
+ *   - 封装底层 kqueue 系统调用细节
  */
 class IOMonitor {
 public:
@@ -66,6 +58,13 @@ public:
   bool StartReadMonitor(int fd);
 
   /**
+   * @brief 停止监控文件描述符的读事件
+   * @param fd 要停止监控的文件描述符
+   * @return true 成功, false 失败
+   */
+  bool StopReadMonitor(int fd);
+
+  /**
    * @brief 开始监控文件描述符的写事件
    * @param fd 要监控的文件描述符
    * @return true 成功, false 失败
@@ -88,22 +87,21 @@ public:
 
   /**
    * @brief 等待事件（阻塞）
-   * @param events 事件数组
+   * @param events kevent 事件数组
    * @param max_events 事件数组最大容量
    * @param timeout_ms 超时时间（毫秒），nullptr 表示无限等待
    * @return 返回的事件数量，-1 表示错误
    */
-  int WaitEvents(void *events, int max_events, const int *timeout_ms);
+  int WaitEvents(struct kevent *events, int max_events, const int *timeout_ms);
 
   /**
    * @brief 获取监控器的文件描述符
-   * @return kqueue_fd 或 epoll_fd
+   * @return kqueue_fd
    */
-  int GetFd() const { return monitor_fd_; }
+  int GetFd() const { return kqueue_fd_; }
 
 private:
-  int monitor_fd_; ///< kqueue_fd 或 epoll_fd
-  int timeout_ms_; ///< 默认超时时间（毫秒）
+  int kqueue_fd_; ///< kqueue 文件描述符
 };
 
 } // namespace network

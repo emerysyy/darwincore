@@ -44,12 +44,15 @@ enum class NetworkEventType {
  * 这些错误用于业务逻辑决策，而不是低级系统错误处理。
  */
 enum class NetworkError {
-  kPeerClosed,        ///< 对端正常关闭连接
-  kResetByPeer,       ///< 连接被对端重置（RST 包）
-  kTimeout,           ///< 操作超时
-  kProtocolViolation, ///< 检测到协议违规
-  kSyscallFailure     ///< 其他系统调用失败
+  kPeerClosed,            ///< 对端正常关闭（FIN）
+  kResetByPeer,           ///< 连接被对端重置（RST）
+  kTimeout,               ///< 操作或连接超时
+  kConnectionRefused,     ///< 对端拒绝连接（ECONNREFUSED）
+  kNetworkUnreachable,    ///< 网络 / 主机不可达
+  kProtocolViolation,     ///< 协议违规（上层使用）
+  kSyscallFailure         ///< 其他系统调用错误
 };
+
 
 /**
  * @brief 连接信息（业务层只读视图）

@@ -1,9 +1,9 @@
 //
 // DarwinCore Network 模块
-// IOMonitor 实现
+// IOMonitor 实现（macOS kqueue）
 //
 // 功能说明：
-//   使用 kqueue (macOS/FreeBSD) 或 epoll (Linux) 实现 IO 事件监控。
+//   使用 kqueue 实现 IO 事件监控。
 //
 // 作者: DarwinCore Network 团队
 // 日期: 2026
@@ -17,7 +17,7 @@
 namespace darwincore {
 namespace network {
 
-IOMonitor::IOMonitor() : monitor_fd_(-1), timeout_ms_(1000) {
+IOMonitor::IOMonitor() : kqueue_fd_(-1) {
   NW_LOG_TRACE("[IOMonitor::IOMonitor] 构造函数");
 }
 
@@ -27,80 +27,83 @@ IOMonitor::~IOMonitor() {
 }
 
 bool IOMonitor::Initialize() {
-#if USE_KQUEUE
   NW_LOG_DEBUG("[IOMonitor::Initialize] 使用 kqueue");
-  monitor_fd_ = kqueue();
-#elif USE_EPOLL
-  NW_LOG_DEBUG("[IOMonitor::Initialize] 使用 epoll");
-  monitor_fd_ = epoll_create1(0);
-#endif
+  kqueue_fd_ = kqueue();
 
-  if (monitor_fd_ < 0) {
-    NW_LOG_ERROR("[IOMonitor::Initialize] 创建监控器失败: " << strerror(errno));
+  if (kqueue_fd_ < 0) {
+    NW_LOG_ERROR("[IOMonitor::Initialize] 创建 kqueue 失败: " << strerror(errno));
     return false;
   }
 
-  NW_LOG_INFO(
-      "[IOMonitor::Initialize] IO 监控器初始化成功，fd=" << monitor_fd_);
+  NW_LOG_INFO("[IOMonitor::Initialize] kqueue 初始化成功，fd=" << kqueue_fd_);
   return true;
 }
 
 void IOMonitor::Close() {
-  if (monitor_fd_ > 0) {
-    NW_LOG_DEBUG("[IOMonitor::Close] 关闭监控器，fd=" << monitor_fd_);
-    close(monitor_fd_);
-    monitor_fd_ = -1;
+  if (kqueue_fd_ > 0) {
+    NW_LOG_DEBUG("[IOMonitor::Close] 关闭 kqueue，fd=" << kqueue_fd_);
+    close(kqueue_fd_);
+    kqueue_fd_ = -1;
   }
 }
 
 bool IOMonitor::StartReadMonitor(int fd) {
-  NW_LOG_DEBUG("[IOMonitor::StartReadMonitor] 开始监控 fd=" << fd);
+  NW_LOG_DEBUG("[IOMonitor::StartReadMonitor] 开始监控读事件 fd=" << fd);
 
-  if (monitor_fd_ == -1) {
-    NW_LOG_ERROR("[IOMonitor::StartReadMonitor] 监控器未初始化！");
+  if (kqueue_fd_ == -1) {
+    NW_LOG_ERROR("[IOMonitor::StartReadMonitor] kqueue 未初始化！");
     return false;
   }
 
-#if USE_KQUEUE
   struct kevent change;
   EV_SET(&change, fd, EVFILT_READ, EV_ADD | EV_ENABLE, 0, 0, nullptr);
-  int ret = kevent(monitor_fd_, &change, 1, nullptr, 0, nullptr);
-#elif USE_EPOLL
-  struct epoll_event event;
-  event.events = EPOLLIN;
-  event.data.fd = fd;
-  int ret = epoll_ctl(monitor_fd_, EPOLL_CTL_ADD, fd, &event);
-#endif
+  int ret = kevent(kqueue_fd_, &change, 1, nullptr, 0, nullptr);
 
   if (ret < 0) {
-    NW_LOG_ERROR("[IOMonitor::StartReadMonitor] 添加监控 fd="
+    NW_LOG_ERROR("[IOMonitor::StartReadMonitor] 添加读监控 fd="
                  << fd << " 失败: " << strerror(errno));
     return false;
   }
 
-  NW_LOG_TRACE("[IOMonitor::StartReadMonitor] fd=" << fd << " 监控添加成功");
+  NW_LOG_TRACE("[IOMonitor::StartReadMonitor] fd=" << fd << " 读监控添加成功");
+  return true;
+}
+
+bool IOMonitor::StopReadMonitor(int fd) {
+  NW_LOG_DEBUG("[IOMonitor::StopReadMonitor] 停止读监控 fd=" << fd);
+
+  if (kqueue_fd_ <= 0) {
+    NW_LOG_WARNING("[IOMonitor::StopReadMonitor] kqueue 未初始化");
+    return false;
+  }
+
+  struct kevent change;
+  EV_SET(&change, fd, EVFILT_READ, EV_DELETE | EV_DISABLE, 0, 0, nullptr);
+  int ret = kevent(kqueue_fd_, &change, 1, nullptr, 0, nullptr);
+
+  if (ret < 0) {
+    if (errno != ENOENT) {
+      NW_LOG_WARNING("[IOMonitor::StopReadMonitor] 停止读监控 fd="
+                     << fd << " 失败: " << strerror(errno));
+    }
+    return false;
+  }
+
+  NW_LOG_TRACE("[IOMonitor::StopReadMonitor] fd=" << fd << " 读监控停止成功");
   return true;
 }
 
 bool IOMonitor::StartWriteMonitor(int fd) {
   NW_LOG_DEBUG("[IOMonitor::StartWriteMonitor] 开始监控写事件 fd=" << fd);
 
-  if (monitor_fd_ == -1) {
-    NW_LOG_ERROR("[IOMonitor::StartWriteMonitor] 监控器未初始化！");
+  if (kqueue_fd_ == -1) {
+    NW_LOG_ERROR("[IOMonitor::StartWriteMonitor] kqueue 未初始化！");
     return false;
   }
 
-#if USE_KQUEUE
   struct kevent change;
   EV_SET(&change, fd, EVFILT_WRITE, EV_ADD | EV_ENABLE, 0, 0, nullptr);
-  int ret = kevent(monitor_fd_, &change, 1, nullptr, 0, nullptr);
-#elif USE_EPOLL
-  // epoll 需要修改已存在的 fd 的事件标志
-  struct epoll_event event;
-  event.events = EPOLLIN | EPOLLOUT; // 同时监控读和写
-  event.data.fd = fd;
-  int ret = epoll_ctl(monitor_fd_, EPOLL_CTL_MOD, fd, &event);
-#endif
+  int ret = kevent(kqueue_fd_, &change, 1, nullptr, 0, nullptr);
 
   if (ret < 0) {
     NW_LOG_ERROR("[IOMonitor::StartWriteMonitor] 添加写监控 fd="
@@ -115,22 +118,14 @@ bool IOMonitor::StartWriteMonitor(int fd) {
 bool IOMonitor::StopWriteMonitor(int fd) {
   NW_LOG_DEBUG("[IOMonitor::StopWriteMonitor] 停止写监控 fd=" << fd);
 
-  if (monitor_fd_ <= 0) {
-    NW_LOG_WARNING("[IOMonitor::StopWriteMonitor] 监控器未初始化");
+  if (kqueue_fd_ <= 0) {
+    NW_LOG_WARNING("[IOMonitor::StopWriteMonitor] kqueue 未初始化");
     return false;
   }
 
-#if USE_KQUEUE
   struct kevent change;
   EV_SET(&change, fd, EVFILT_WRITE, EV_DELETE | EV_DISABLE, 0, 0, nullptr);
-  int ret = kevent(monitor_fd_, &change, 1, nullptr, 0, nullptr);
-#elif USE_EPOLL
-  // epoll 需要恢复为只监控读事件
-  struct epoll_event event;
-  event.events = EPOLLIN; // 只监控读
-  event.data.fd = fd;
-  int ret = epoll_ctl(monitor_fd_, EPOLL_CTL_MOD, fd, &event);
-#endif
+  int ret = kevent(kqueue_fd_, &change, 1, nullptr, 0, nullptr);
 
   if (ret < 0) {
     if (errno != ENOENT) {
@@ -147,18 +142,14 @@ bool IOMonitor::StopWriteMonitor(int fd) {
 bool IOMonitor::StopMonitor(int fd) {
   NW_LOG_DEBUG("[IOMonitor::StopMonitor] 停止监控 fd=" << fd);
 
-  if (monitor_fd_ <= 0) {
-    NW_LOG_WARNING("[IOMonitor::StopMonitor] 监控器未初始化");
+  if (kqueue_fd_ <= 0) {
+    NW_LOG_WARNING("[IOMonitor::StopMonitor] kqueue 未初始化");
     return false;
   }
 
-#if USE_KQUEUE
   struct kevent change;
   EV_SET(&change, fd, EVFILT_READ, EV_DELETE | EV_DISABLE, 0, 0, nullptr);
-  int ret = kevent(monitor_fd_, &change, 1, nullptr, 0, nullptr);
-#elif USE_EPOLL
-  int ret = epoll_ctl(monitor_fd_, EPOLL_CTL_DEL, fd, nullptr);
-#endif
+  int ret = kevent(kqueue_fd_, &change, 1, nullptr, 0, nullptr);
 
   if (ret < 0) {
     // ENOENT 通常表示 fd 不在监控中，这种情况不应该记录为错误
@@ -173,8 +164,9 @@ bool IOMonitor::StopMonitor(int fd) {
   return true;
 }
 
-int IOMonitor::WaitEvents(void *events, int max_events, const int *timeout_ms) {
-  if (events == nullptr || max_events == 0 || monitor_fd_ <= 0) {
+int IOMonitor::WaitEvents(struct kevent *events, int max_events,
+                          const int *timeout_ms) {
+  if (events == nullptr || max_events == 0 || kqueue_fd_ <= 0) {
     return 0;
   }
 
@@ -187,14 +179,7 @@ int IOMonitor::WaitEvents(void *events, int max_events, const int *timeout_ms) {
     timeout_ptr = &timeout;
   }
 
-#if USE_KQUEUE
-  int count =
-      kevent(monitor_fd_, nullptr, 0, static_cast<struct kevent *>(events),
-             max_events, timeout_ptr);
-#elif USE_EPOLL
-  int count = epoll_wait(monitor_fd_, static_cast<struct epoll_event *>(events),
-                         max_events, *timeout_ms);
-#endif
+  int count = kevent(kqueue_fd_, nullptr, 0, events, max_events, timeout_ptr);
 
   // 如果有事件，记录日志（TRACE 级别，避免日志过多）
   if (count > 0) {

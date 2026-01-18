@@ -1,10 +1,11 @@
 //
 // DarwinCore Network Module
-// Thread-Safe Queue for Events
+// Thread-Safe Queue for Events（带容量限制）
 //
 // Description:
 //   A thread-safe queue implementation using mutex and condition variable.
 //   Used by WorkerPool to receive NetworkEvents from Reactors.
+//   Supports capacity limits for backpressure control.
 //
 // Thread Safety:
 //   - All operations are thread-safe
@@ -26,16 +27,25 @@ namespace darwincore {
 namespace network {
 
 /**
- * @brief Thread-safe queue for inter-thread communication
+ * @brief Thread-safe queue for inter-thread communication with capacity limits
  *
  * This template class provides a thread-safe queue that can be used
  * to pass data between threads. It uses a mutex to protect access
  * and a condition variable to notify waiting threads.
  *
+ * New features:
+ *   - Optional capacity limit for backpressure control
+ *   - TryEnqueue() for non-blocking enqueue
+ *   - Size() and IsFull() for monitoring
+ *
  * Usage Example:
  *   @code
- *   ConcurrentQueue<int> queue;
- *   queue.Enqueue(42);  // Thread-safe enqueue
+ *   ConcurrentQueue<int> queue(1000);  // Max 1000 items
+ *   queue.Enqueue(42);                 // Blocking enqueue
+ *
+ *   if (queue.TryEnqueue(43)) {        // Non-blocking enqueue
+ *     // Successfully enqueued
+ *   }
  *
  *   int value;
  *   if (queue.TryDequeue(value)) {
@@ -47,8 +57,12 @@ namespace network {
  */
 template <typename T> class ConcurrentQueue {
 public:
-  /// Default constructor
-  ConcurrentQueue() : is_stopped_(false) {}
+  /// Default constructor (unlimited capacity)
+  ConcurrentQueue() : max_size_(0), is_stopped_(false) {}
+
+  /// Constructor with capacity limit
+  /// @param max_size Maximum queue size (0 = unlimited)
+  explicit ConcurrentQueue(size_t max_size) : max_size_(max_size), is_stopped_(false) {}
 
   /// Destructor
   ~ConcurrentQueue() = default;
@@ -58,15 +72,58 @@ public:
   ConcurrentQueue &operator=(const ConcurrentQueue &) = delete;
 
   /**
-   * @brief Enqueue an element to the queue
+   * @brief Enqueue an element to the queue (blocking)
    * @param value Value to enqueue (thread-safe)
+   *
+   * If queue is full, blocks until space is available.
    */
-  void Enqueue(const T &value) {
+bool Enqueue(const T& value) {
+  {
+    std::unique_lock<std::mutex> lock(mutex_);
+
+    if (max_size_ > 0) {
+      not_full_.wait(lock, [this] {
+        return queue_.size() < max_size_ || is_stopped_;
+      });
+    }
+
+    if (is_stopped_) {
+      return false;
+    }
+
+    queue_.push(value);
+  }
+
+  not_empty_.notify_one();
+  return true;
+}
+
+
+  /**
+   * @brief Try to enqueue an element to the queue (non-blocking)
+   * @param value Value to enqueue
+   * @return true if enqueued successfully, false if queue is full
+   *
+   * This is the key method for backpressure control.
+   * Returns false immediately if queue is full.
+   */
+  bool TryEnqueue(const T &value) {
     {
       std::lock_guard<std::mutex> lock(mutex_);
+
+      // Check if queue is full
+      if (max_size_ > 0 && queue_.size() >= max_size_) {
+        return false; // Queue is full
+      }
+
+      if (is_stopped_) {
+        return false; // Don't enqueue if stopped
+      }
+
       queue_.push(value);
     }
-    condition_variable_.notify_one();
+    not_empty_.notify_one();
+    return true;
   }
 
   /**
@@ -81,6 +138,12 @@ public:
     }
     result = std::move(queue_.front());
     queue_.pop();
+
+    // Notify one waiting enqueuer that space is available
+    if (max_size_ > 0) {
+      not_full_.notify_one();
+    }
+
     return true;
   }
 
@@ -98,8 +161,9 @@ public:
   bool WaitDequeue(T &result, std::chrono::milliseconds timeout) {
     std::unique_lock<std::mutex> lock(mutex_);
 
-    bool success = condition_variable_.wait_for(
-        lock, timeout, [this] { return !queue_.empty() || is_stopped_; });
+    bool success = not_empty_.wait_for(lock, timeout, [this] {
+      return !queue_.empty() || is_stopped_;
+    });
 
     if (!success || is_stopped_ || queue_.empty()) {
       return false;
@@ -107,6 +171,12 @@ public:
 
     result = std::move(queue_.front());
     queue_.pop();
+
+    // Notify one waiting enqueuer that space is available
+    if (max_size_ > 0) {
+      not_full_.notify_one();
+    }
+
     return true;
   }
 
@@ -121,7 +191,8 @@ public:
       std::lock_guard<std::mutex> lock(mutex_);
       is_stopped_ = true;
     }
-    condition_variable_.notify_all();
+    not_empty_.notify_all();
+    not_full_.notify_all();
   }
 
   /**
@@ -130,8 +201,11 @@ public:
    * Call this to allow WaitDequeue to work again after NotifyStop.
    */
   void Reset() {
-    std::lock_guard<std::mutex> lock(mutex_);
-    is_stopped_ = false;
+    {
+      std::lock_guard<std::mutex> lock(mutex_);
+      is_stopped_ = false;
+    }
+    // Note: We don't notify here as the queue is being reset
   }
 
   /**
@@ -144,17 +218,42 @@ public:
   }
 
   /**
+   * @brief Get the current queue size
+   * @return Number of elements in the queue
+   */
+  size_t Size() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return queue_.size();
+  }
+
+  /**
+   * @brief Check if the queue is full
+   * @return true if queue is full (and has a limit), false otherwise
+   */
+  bool IsFull() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return max_size_ > 0 && queue_.size() >= max_size_;
+  }
+
+  /**
    * @brief Check if the queue is stopped
    * @return true if stopped, false otherwise
    */
   bool IsStopped() const { return is_stopped_; }
 
+  /**
+   * @brief Get the maximum queue size
+   * @return Maximum queue size (0 = unlimited)
+   */
+  size_t GetMaxSize() const { return max_size_; }
+
 private:
-  mutable std::mutex mutex_; ///< Mutex for thread synchronization
-  std::queue<T> queue_;      ///< Underlying queue
-  std::condition_variable
-      condition_variable_;       ///< Condition variable for notifications
-  std::atomic<bool> is_stopped_; ///< Flag to indicate stop notification
+  mutable std::mutex mutex_;        ///< Mutex for thread synchronization
+  std::queue<T> queue_;             ///< Underlying queue
+  std::condition_variable not_empty_;   ///< Condition variable for dequeue
+  std::condition_variable not_full_;    ///< Condition variable for enqueue (when limited)
+  std::atomic<bool> is_stopped_;    ///< Flag to indicate stop notification
+  size_t max_size_;                 ///< Maximum queue size (0 = unlimited)
 };
 
 } // namespace network

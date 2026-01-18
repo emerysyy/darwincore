@@ -55,8 +55,9 @@ public:
   /**
    * @brief 构造一个新的 WorkerPool 对象
    * @param worker_count 要创建的工作线程数量
+   * @param max_queue_size 每个队列的最大容量（0 = 无限制）
    */
-  explicit WorkerPool(size_t worker_count);
+  explicit WorkerPool(size_t worker_count, size_t max_queue_size = 0);
 
   /// 析构函数 - 停止所有工作线程
   ~WorkerPool();
@@ -77,13 +78,25 @@ public:
   void Stop();
 
   /**
-   * @brief 提交事件到工作线程池
+   * @brief 提交事件到工作线程池（阻塞模式）
    * @param event 要处理的网络事件
    *
    * 使用轮询策略将事件分配到不同的 Worker。
    * 此方法可以从任何线程调用，包括 Reactor 线程。
+   * 如果队列满，会阻塞直到有空间可用。
    */
   void SubmitEvent(const NetworkEvent& event);
+
+  /**
+   * @brief 尝试提交事件到工作线程池（非阻塞模式）
+   * @param event 要处理的网络事件
+   * @return 提交成功返回 true，队列满返回 false
+   *
+   * 使用轮询策略将事件分配到不同的 Worker。
+   * 此方法可以从任何线程调用，包括 Reactor 线程。
+   * 如果队列满，立即返回 false（用于背压控制）。
+   */
+  bool TrySubmitEvent(const NetworkEvent& event);
 
   /**
    * @brief 设置事件回调函数
@@ -92,6 +105,12 @@ public:
    * Worker 线程处理完事件后会调用此回调函数。
    */
   void SetEventCallback(EventCallback callback);
+
+  /**
+   * @brief 获取所有队列的总大小
+   * @return 所有队列中的事件总数
+   */
+  size_t GetTotalQueueSize() const;
 
 private:
   /**
@@ -110,6 +129,7 @@ private:
 
 private:
   size_t worker_count_;                                              ///< 工作线程数量
+  size_t max_queue_size_;                                            ///< 每个队列的最大容量（0 = 无限制）
   std::vector<std::thread> worker_threads_;                         ///< 工作线程列表
   std::vector<std::unique_ptr<ConcurrentQueue<NetworkEvent>>> event_queues_;  ///< 每个线程的事件队列
   EventCallback event_callback_;                                     ///< 事件回调函数

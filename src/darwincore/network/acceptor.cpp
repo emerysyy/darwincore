@@ -188,13 +188,8 @@ namespace darwincore {
 
             NW_LOG_INFO("[Acceptor::AcceptLoop] 开始监听连接...");
 
-#if USE_KQUEUE
             const int kMaxEvents = 32;
             struct kevent events[kMaxEvents];
-#else
-  const int kMaxEvents = 32;
-  struct epoll_event events[kMaxEvents];
-#endif
 
             while (is_running_) {
                 // 等待事件，设置 100ms 超时以便检查 is_running_
@@ -212,11 +207,7 @@ namespace darwincore {
                 }
 
                 for (int i = 0; i < nev; ++i) {
-#if USE_KQUEUE
                     int fd = events[i].ident;
-#else
-      int fd = events[i].data.fd;
-#endif
 
                     if (fd == listen_fd_) {
                         // 有新连接到达
@@ -302,15 +293,16 @@ namespace darwincore {
             NW_LOG_DEBUG("[Acceptor] 将 fd=" << fd << " 添加到 Reactor (reactor_id="
                 << reactor->GetReactorId() << ")");
             // 将 fd 添加到 Reactor（Reactor 内部会提交 kConnected 事件）
-            uint64_t connection_id = reactor->AddConnection(fd, peer);
-            if (connection_id == 0) {
+            // 注意：AddConnection 现在是异步的，connection_id 将在 Reactor 线程中生成
+            bool success = reactor->AddConnection(fd, peer);
+            if (!success) {
                 NW_LOG_ERROR(
                     "[Acceptor::AssignToReactor] Reactor::AddConnection 失败，关闭 fd="
                     << fd);
                 close(fd);
             } else {
                 NW_LOG_DEBUG(
-                    "[Acceptor] Reactor::AddConnection 成功，conn_id=" << connection_id);
+                    "[Acceptor] Reactor::AddConnection 成功，等待 kConnected 事件");
             }
         }
     } // namespace network

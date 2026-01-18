@@ -6,5 +6,5 @@
 # - network: 网络通信库（TCP 服务器、TCP 客户端）
 # ========================================
 
-add_subdirectory(foundation)
+# add_subdirectory(foundation)
 add_subdirectory(network)

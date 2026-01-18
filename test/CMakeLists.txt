@@ -25,8 +25,10 @@ include_directories(
 set(NETWORK_SOURCES
     ${PARENT_DIR}/src/darwincore/network/acceptor.cpp
     ${PARENT_DIR}/src/darwincore/network/client.cpp
+    ${PARENT_DIR}/src/darwincore/network/connection_id_generator.cpp
     ${PARENT_DIR}/src/darwincore/network/io_monitor.cpp
     ${PARENT_DIR}/src/darwincore/network/reactor.cpp
+    ${PARENT_DIR}/src/darwincore/network/send_buffer.cpp
     ${PARENT_DIR}/src/darwincore/network/server.cpp
     ${PARENT_DIR}/src/darwincore/network/socket_helper.cpp
     ${PARENT_DIR}/src/darwincore/network/worker_pool.cpp
