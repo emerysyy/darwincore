@@ -107,6 +107,21 @@ add_custom_target(test_sigpipe_run
     COMMENT "Running SIGPIPE handling test"
 )
 
+# ==================== 测试 5: Client::SetOnMessage 单元测试 ====================
+add_executable(test_client_setonmessage
+    test_client_setonmessage.cpp
+    ${NETWORK_SOURCES}
+)
+target_compile_options(test_client_setonmessage PRIVATE -g -O0)
+
+# SetOnMessage 单元测试
+add_custom_target(test_setonmessage
+    COMMAND test_client_setonmessage
+    DEPENDS test_client_setonmessage
+    WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
+    COMMENT "Running Client::SetOnMessage unit tests"
+)
+
 # 综合测试
 add_custom_target(test_all
     COMMAND test_kqueue_core

@@ -170,6 +170,7 @@ private:
 
 private:
   int listen_fd_;                         ///< 监听 Socket 文件描述符
+  std::string unix_socket_path_;          ///< Unix 域套接字路径  
   std::unique_ptr<IOMonitor> io_monitor_; ///< IO 监控器（智能指针管理）
   std::thread accept_thread_;             ///< Accept 线程
   std::atomic<bool> is_running_{false}; ///< 运行状态

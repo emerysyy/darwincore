@@ -30,280 +30,376 @@
 #define SOMAXCONN 128
 #endif
 
-namespace darwincore {
-    namespace network {
-        Acceptor::Acceptor()
-            : listen_fd_(-1), io_monitor_(std::make_unique<IOMonitor>()),
-              next_reactor_index_(0) {
-            io_monitor_->Initialize();
+namespace darwincore
+{
+  namespace network
+  {
+    Acceptor::Acceptor()
+        : listen_fd_(-1), io_monitor_(std::make_unique<IOMonitor>()),
+          next_reactor_index_(0), is_running_(false)
+    {
+      io_monitor_->Initialize();
+    }
+
+    Acceptor::~Acceptor()
+    {
+      Stop();
+      // io_monitor_ 由 unique_ptr 自动释放
+    }
+
+    bool Acceptor::ListenIPv4(const std::string &host, uint16_t port)
+    {
+      return ListenGeneric(SocketProtocol::kIPv4, host, port);
+    }
+
+    bool Acceptor::ListenIPv6(const std::string &host, uint16_t port)
+    {
+      return ListenGeneric(SocketProtocol::kIPv6, host, port);
+    }
+
+    bool Acceptor::ListenUnixDomain(const std::string &path)
+    {
+      bool result = ListenGeneric(SocketProtocol::kUnixDomain, path, 0);
+      if (result)
+      {
+        unix_socket_path_ = path;
+      }
+      return result;
+    }
+
+    void Acceptor::SetReactors(
+        const std::vector<std::weak_ptr<Reactor>> &reactors)
+    {
+      // 直接存储 weak_ptr，不延长生命周期
+      reactors_ = reactors;
+    }
+
+    void Acceptor::Stop()
+    {
+      // 使用 compare_exchange 确保只执行一次停止逻辑
+      bool expected = true;
+      if (!is_running_.compare_exchange_strong(expected, false))
+      {
+        // 已经停止或正在停止
+        return;
+      }
+
+      NW_LOG_DEBUG("[Acceptor::Stop] 开始停止 Acceptor");
+
+      // 唤醒 accept 线程
+      if (io_monitor_)
+      {
+        // 通过停止监控器来唤醒 kevent/epoll_wait
+        if (listen_fd_ >= 0)
+        {
+          io_monitor_->StopMonitor(listen_fd_);
+        }
+      }
+
+      if (accept_thread_.joinable())
+      {
+        accept_thread_.join();
+        NW_LOG_DEBUG("[Acceptor::Stop] accept_thread 已结束");
+      }
+
+      if (listen_fd_ >= 0)
+      {
+        close(listen_fd_);
+        listen_fd_ = -1;
+      }
+
+      // 清理 Unix Domain Socket 文件
+      if (!unix_socket_path_.empty())
+      {
+        SocketHelper::UnlinkUnixDomainSocket(unix_socket_path_);
+        unix_socket_path_.clear();
+        NW_LOG_DEBUG("[Acceptor::Stop] 已清理 Unix Domain Socket: "
+                     << unix_socket_path_);
+      }
+
+      NW_LOG_INFO("[Acceptor::Stop] Acceptor 已完全停止");
+    }
+
+    bool Acceptor::IsRunning() const
+    {
+      return is_running_.load();
+    }
+
+    bool Acceptor::ListenGeneric(SocketProtocol protocol, const std::string &host,
+                                 uint16_t port)
+    {
+      // 创建 Socket
+      int fd = SocketHelper::CreateSocket(protocol);
+      if (fd < 0)
+      {
+        NW_LOG_ERROR("[Acceptor::ListenGeneric] CreateSocket 失败");
+        return false;
+      }
+
+      // 设置非阻塞
+      if (!SocketHelper::SetNonBlocking(fd))
+      {
+        NW_LOG_ERROR("[Acceptor::ListenGeneric] SetNonBlocking 失败");
+        close(fd);
+        return false;
+      }
+
+      // 设置 SO_REUSEADDR (允许端口快速重用)
+      int opt = 1;
+      if (!SocketHelper::SetSocketOption(fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt)))
+      {
+        NW_LOG_WARNING("[Acceptor::ListenGeneric] SO_REUSEADDR 设置失败");
+        close(fd);
+        return false;
+      }
+
+      // 设置 SO_REUSEPORT (允许多个 socket 监听同一端口)
+      // 这对于负载均衡和多进程很有用
+      bool reuseport_set = SocketHelper::SetSocketOption(
+          fd, SOL_SOCKET, SO_REUSEPORT, &opt, sizeof(opt));
+      if (!reuseport_set)
+      {
+        // 忽略失败，SO_REUSEPORT 不是所有平台都支持
+        NW_LOG_DEBUG("[Acceptor::ListenGeneric] SO_REUSEPORT 设置失败（可能不支持）");
+      }
+
+      // 解析并绑定地址
+      sockaddr_storage addr = {};
+      if (!SocketHelper::ResolveAddress(host, port, protocol, &addr))
+      {
+        NW_LOG_ERROR("[Acceptor::ListenGeneric] ResolveAddress 失败: " << host);
+        close(fd);
+        return false;
+      }
+
+      // 对于 Unix Domain Socket，在 bind 之前清理旧文件
+      if (protocol == SocketProtocol::kUnixDomain)
+      {
+        SocketHelper::UnlinkUnixDomainSocket(host);
+      }
+
+      // 计算正确的地址长度
+      socklen_t addr_len = 0;
+      switch (addr.ss_family)
+      {
+      case AF_INET:
+        addr_len = sizeof(sockaddr_in);
+        break;
+      case AF_INET6:
+        addr_len = sizeof(sockaddr_in6);
+        break;
+      case AF_UNIX:
+        addr_len = sizeof(sockaddr_un);
+        break;
+      default:
+        addr_len = sizeof(addr);
+        break;
+      }
+
+      if (bind(fd, reinterpret_cast<const sockaddr *>(&addr), addr_len) < 0)
+      {
+        NW_LOG_ERROR("[Acceptor::ListenGeneric] bind 失败: " << strerror(errno)
+                                                             << ", fd=" << fd);
+        close(fd);
+        return false;
+      }
+
+      // 开始监听
+      // 使用系统默认的 backlog (SOMAXCONN)
+      // 这已经是平台优化的值，通常在 128-4096 之间
+      if (listen(fd, SOMAXCONN) < 0)
+      {
+        NW_LOG_ERROR("[Acceptor::ListenGeneric] listen 失败: " << strerror(errno)
+                                                               << ", fd=" << fd);
+        close(fd);
+        return false;
+      }
+
+      listen_fd_ = fd;
+      NW_LOG_INFO("[Acceptor::ListenGeneric] 监听成功: fd="
+                  << fd << ", backlog=" << SOMAXCONN << ", SO_REUSEADDR=1"
+                  << ", SO_REUSEPORT=" << (reuseport_set ? "1" : "0")
+                  << ", protocol=" << static_cast<int>(protocol));
+
+      is_running_.store(true);
+      accept_thread_ = std::thread(&Acceptor::AcceptLoop, this);
+
+      return true;
+    }
+
+    void Acceptor::AcceptLoop()
+    {
+      NW_LOG_DEBUG("[Acceptor::AcceptLoop] AcceptLoop 启动，listen_fd=" << listen_fd_);
+
+      if (!io_monitor_)
+      {
+        NW_LOG_ERROR("[Acceptor::AcceptLoop] io_monitor_ 为空");
+        return;
+      }
+
+      // 监听 listen_fd 的可读事件
+      if (!io_monitor_->StartReadMonitor(listen_fd_))
+      {
+        NW_LOG_ERROR("[Acceptor::AcceptLoop] 启动监控 listen_fd 失败");
+        return;
+      }
+
+      NW_LOG_INFO("[Acceptor::AcceptLoop] 开始监听连接...");
+
+      // Acceptor 只需要监听一个 fd，不需要太多事件槽位
+      const int kMaxEvents = 2;
+      struct kevent events[kMaxEvents];
+
+      while (is_running_.load())
+      {
+        // 使用较长的超时时间减少不必要的 CPU 唤醒
+        // 1 秒足够响应停止信号
+        int timeout_ms = 1000;
+        int nev = io_monitor_->WaitEvents(events, kMaxEvents, &timeout_ms);
+
+        if (nev < 0)
+        {
+          if (errno == EINTR)
+          {
+            NW_LOG_TRACE("[Acceptor::AcceptLoop] 被信号中断，继续等待");
+            continue; // 被信号中断
+          }
+          NW_LOG_ERROR(
+              "[Acceptor::AcceptLoop] WaitEvents 出错: " << strerror(errno));
+          // 记录错误但继续运行，除非是严重错误
+          if (errno == EBADF || errno == EFAULT)
+          {
+            NW_LOG_ERROR("[Acceptor::AcceptLoop] 严重错误，退出循环");
+            break;
+          }
+          continue;
         }
 
-        Acceptor::~Acceptor() {
-            Stop();
-            // io_monitor_ 由 unique_ptr 自动释放
+        // 超时或没有事件
+        if (nev == 0)
+        {
+          continue;
         }
 
-        bool Acceptor::ListenIPv4(const std::string &host, uint16_t port) {
-            return ListenGeneric(SocketProtocol::kIPv4, host, port);
-        }
+        for (int i = 0; i < nev; ++i)
+        {
+          int fd = static_cast<int>(events[i].ident);
 
-        bool Acceptor::ListenIPv6(const std::string &host, uint16_t port) {
-            return ListenGeneric(SocketProtocol::kIPv6, host, port);
-        }
+          if (fd == listen_fd_)
+          {
+            // 批量接受连接，提高性能
+            // 在一次事件触发中尽可能多地接受连接
+            const int kMaxAcceptPerLoop = 16;
+            for (int j = 0; j < kMaxAcceptPerLoop; ++j)
+            {
+              sockaddr_storage peer_addr = {};
+              socklen_t peer_len = sizeof(peer_addr);
 
-        bool Acceptor::ListenUnixDomain(const std::string &path) {
-            return ListenGeneric(SocketProtocol::kUnixDomain, path, 0);
-        }
+              int client_fd = accept(listen_fd_, reinterpret_cast<sockaddr *>(&peer_addr), &peer_len);
 
-        void Acceptor::SetReactors(
-            const std::vector<std::weak_ptr<Reactor> > &reactors) {
-            // 直接存储 weak_ptr，不延长生命周期
-            reactors_ = reactors;
-        }
-
-        void Acceptor::Stop() {
-            is_running_ = false;
-
-            // 唤醒 accept 线程
-            if (io_monitor_) {
-                // 通过停止监控器来唤醒 kevent/epoll_wait
-                // io_monitor_ 会在析构时自动清理资源
-            }
-
-            if (accept_thread_.joinable()) {
-                accept_thread_.join();
-            }
-
-            if (listen_fd_ >= 0) {
-                close(listen_fd_);
-                listen_fd_ = -1;
-            }
-        }
-
-        bool Acceptor::IsRunning() const { return is_running_; }
-
-        bool Acceptor::ListenGeneric(SocketProtocol protocol, const std::string &host,
-                                     uint16_t port) {
-            // 创建 Socket
-            int fd = SocketHelper::CreateSocket(protocol);
-            if (fd < 0) {
-                NW_LOG_ERROR("[Acceptor::ListenGeneric] CreateSocket 失败");
-                return false;
-            }
-
-            // 设置非阻塞
-            if (!SocketHelper::SetNonBlocking(fd)) {
-                NW_LOG_ERROR("[Acceptor::ListenGeneric] SetNonBlocking 失败");
-                close(fd);
-                return false;
-            }
-
-            // 设置 SO_REUSEADDR (允许端口快速重用)
-            int opt = 1;
-            if (!SocketHelper::SetSocketOption(fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt))) {
-                NW_LOG_WARNING("[Acceptor::ListenGeneric] SO_REUSEADDR 设置失败");
-                close(fd);
-                return false;
-            }
-
-            // 设置 SO_REUSEPORT (允许多个 socket 监听同一端口)
-            // 这对于负载均衡和多进程很有用
-            if (!SocketHelper::SetSocketOption(fd, SOL_SOCKET, SO_REUSEPORT, &opt, sizeof(opt))) {
-                // 忽略失败，SO_REUSEPORT 不是所有平台都支持
-                NW_LOG_DEBUG("[Acceptor::ListenGeneric] SO_REUSEPORT 设置失败（可能不支持）");
-            }
-
-            // 解析并绑定地址
-            sockaddr_storage addr = {};
-            if (!SocketHelper::ResolveAddress(host, port, protocol, &addr)) {
-                NW_LOG_ERROR("[Acceptor::ListenGeneric] ResolveAddress 失败: " << host);
-                close(fd);
-                return false;
-            }
-
-            // 对于 Unix Domain Socket，在 bind 之前清理旧文件
-            if (protocol == SocketProtocol::kUnixDomain) {
-                SocketHelper::UnlinkUnixDomainSocket(host);
-            }
-
-            // 计算正确的地址长度
-            socklen_t addr_len = 0;
-            switch (addr.ss_family) {
-                case AF_INET:
-                    addr_len = sizeof(sockaddr_in);
-                    break;
-                case AF_INET6:
-                    addr_len = sizeof(sockaddr_in6);
-                    break;
-                case AF_UNIX:
-                    addr_len = sizeof(sockaddr_un);
-                    break;
-                default:
-                    addr_len = sizeof(addr);
-                    break;
-            }
-
-            if (bind(fd, reinterpret_cast<const sockaddr *>(&addr), addr_len) < 0) {
-                NW_LOG_ERROR("[Acceptor::ListenGeneric] bind 失败: " << strerror(errno)
-                    << ", fd=" << fd);
-                close(fd);
-                return false;
-            }
-
-            // 开始监听
-            // 使用系统默认的 backlog (SOMAXCONN)
-            // 这已经是平台优化的值，通常在 128-4096 之间
-            if (listen(fd, SOMAXCONN) < 0) {
-                NW_LOG_ERROR("[Acceptor::ListenGeneric] listen 失败: " << strerror(errno)
-                    << ", fd=" << fd);
-                close(fd);
-                return false;
-            }
-
-            listen_fd_ = fd;
-            NW_LOG_INFO("[Acceptor::ListenGeneric] 监听成功: fd="
-                << fd << ", backlog=" << SOMAXCONN << ", SO_REUSEADDR=1"
-                << ", SO_REUSEPORT=1"
-                << ", protocol=" << static_cast<int>(protocol));
-
-            is_running_ = true;
-            accept_thread_ = std::thread(&Acceptor::AcceptLoop, this);
-
-            return true;
-        }
-
-        void Acceptor::AcceptLoop() {
-            NW_LOG_DEBUG("[Acceptor::AcceptLoop] AcceptLoop 启动，listen_fd=" << listen_fd_);
-
-            if (!io_monitor_) {
-                NW_LOG_ERROR("[Acceptor::AcceptLoop] io_monitor_ 为空");
-                return;
-            }
-
-            // 监听 listen_fd 的可读事件
-            if (!io_monitor_->StartReadMonitor(listen_fd_)) {
-                NW_LOG_ERROR("[Acceptor::AcceptLoop] 启动监控 listen_fd 失败");
-                return;
-            }
-
-            NW_LOG_INFO("[Acceptor::AcceptLoop] 开始监听连接...");
-
-            const int kMaxEvents = 32;
-            struct kevent events[kMaxEvents];
-
-            while (is_running_) {
-                // 等待事件，设置 100ms 超时以便检查 is_running_
-                int timeout_ms = 100;
-                int nev = io_monitor_->WaitEvents(events, kMaxEvents, &timeout_ms);
-
-                if (nev < 0) {
-                    if (errno == EINTR) {
-                        NW_LOG_TRACE("[Acceptor::AcceptLoop] 被信号中断，继续等待");
-                        continue; // 被信号中断
-                    }
-                    NW_LOG_ERROR(
-                        "[Acceptor::AcceptLoop] WaitEvents 出错: " << strerror(errno));
-                    break; // 其他错误，退出循环
+              if (client_fd < 0)
+              {
+                if (errno == EAGAIN || errno == EWOULDBLOCK)
+                {
+                  // 没有更多连接了，跳出内层循环
+                  break;
                 }
-
-                for (int i = 0; i < nev; ++i) {
-                    int fd = events[i].ident;
-
-                    if (fd == listen_fd_) {
-                        // 有新连接到达
-                        sockaddr_storage peer_addr = {};
-                        socklen_t peer_len = sizeof(peer_addr);
-
-                        int client_fd = accept(
-                            listen_fd_, reinterpret_cast<sockaddr *>(&peer_addr), &peer_len);
-
-                        if (client_fd < 0) {
-                            if (errno == EAGAIN || errno == EWOULDBLOCK) {
-                                continue; // 没有连接了，继续等待
-                            }
-                            NW_LOG_ERROR(
-                                "[Acceptor::AcceptLoop] accept 失败: " << strerror(errno));
-                            // 其他错误，退出循环
-                            break;
-                        }
-
-                        NW_LOG_TRACE(
-                            "[Acceptor::AcceptLoop] 接受新连接，client_fd=" << client_fd);
-
-                        // 设置客户端 Socket 为非阻塞
-                        if (!SocketHelper::SetNonBlocking(client_fd)) {
-                            NW_LOG_ERROR("[Acceptor::AcceptLoop] 设置非阻塞失败，关闭 client_fd="
-                                << client_fd);
-                            close(client_fd);
-                            continue;
-                        }
-
-                        // 设置 TCP_NODELAY，禁用 Nagle 算法，降低延迟
-                        int flag = 1;
-                        SocketHelper::SetSocketOption(client_fd, IPPROTO_TCP, TCP_NODELAY,
-                                                      &flag, sizeof(flag));
-
-                        // 设置发送/接收缓冲区大小 (64KB)
-                        int buf_size = 64 * 1024;
-                        SocketHelper::SetSocketOption(client_fd, SOL_SOCKET, SO_SNDBUF,
-                                                      &buf_size, sizeof(buf_size));
-                        SocketHelper::SetSocketOption(client_fd, SOL_SOCKET, SO_RCVBUF,
-                                                      &buf_size, sizeof(buf_size));
-
-                        NW_LOG_DEBUG("[Acceptor::AcceptLoop] 新连接 fd="
-                            << client_fd << " 准备分配给 Reactor");
-                        // 将新连接分配给 Reactor
-                        AssignToReactor(client_fd, peer_addr);
-                    }
-                }
-            }
-
-            // 停止监听 listen_fd
-            NW_LOG_DEBUG("[Acceptor::AcceptLoop] AcceptLoop 结束，停止监听 listen_fd="
-                << listen_fd_);
-            io_monitor_->StopMonitor(listen_fd_);
-        }
-
-        void Acceptor::AssignToReactor(int fd, const sockaddr_storage &peer) {
-            NW_LOG_TRACE("[Acceptor::AssignToReactor] 开始分配 fd=" << fd);
-
-            if (reactors_.empty()) {
-                // 如果没有配置 Reactor，无法处理此连接
+                // 记录错误但继续处理其他连接
                 NW_LOG_ERROR(
-                    "[Acceptor::AssignToReactor] reactors_.empty()，关闭 fd=" << fd);
-                close(fd);
-                return;
-            }
+                    "[Acceptor::AcceptLoop] accept 失败: " << strerror(errno));
+                continue;
+              }
 
-            // 使用轮询策略选择 Reactor
-            size_t index = next_reactor_index_.fetch_add(1) % reactors_.size();
-            NW_LOG_DEBUG("[Acceptor] reactors_.size="
-                << reactors_.size() << ", 选择的 reactor_index=" << index);
-            auto reactor_weak = reactors_[index];
+              NW_LOG_TRACE(
+                  "[Acceptor::AcceptLoop] 接受新连接，client_fd=" << client_fd);
 
-            // 使用 lock() 获取 shared_ptr，必须检查是否有效
-            auto reactor = reactor_weak.lock();
-            if (!reactor) {
-                // Reactor 已被销毁，无法处理此连接
-                NW_LOG_ERROR("[Acceptor::AssignToReactor] Reactor 无效，关闭 fd=" << fd);
-                close(fd);
-                return;
-            }
+              // 设置客户端 Socket 为非阻塞
+              if (!SocketHelper::SetNonBlocking(client_fd))
+              {
+                NW_LOG_ERROR("[Acceptor::AcceptLoop] 设置非阻塞失败，关闭 client_fd="
+                             << client_fd);
+                close(client_fd);
+                continue;
+              }
 
-            NW_LOG_DEBUG("[Acceptor] 将 fd=" << fd << " 添加到 Reactor (reactor_id="
-                << reactor->GetReactorId() << ")");
-            // 将 fd 添加到 Reactor（Reactor 内部会提交 kConnected 事件）
-            // 注意：AddConnection 现在是异步的，connection_id 将在 Reactor 线程中生成
-            bool success = reactor->AddConnection(fd, peer);
-            if (!success) {
-                NW_LOG_ERROR(
-                    "[Acceptor::AssignToReactor] Reactor::AddConnection 失败，关闭 fd="
-                    << fd);
-                close(fd);
-            } else {
-                NW_LOG_DEBUG(
-                    "[Acceptor] Reactor::AddConnection 成功，等待 kConnected 事件");
+              // 设置 TCP_NODELAY，禁用 Nagle 算法，降低延迟
+              int flag = 1;
+              SocketHelper::SetSocketOption(client_fd, IPPROTO_TCP, TCP_NODELAY,
+                                            &flag, sizeof(flag));
+
+              // 设置发送/接收缓冲区大小 (64KB)
+              int buf_size = 64 * 1024;
+              SocketHelper::SetSocketOption(client_fd, SOL_SOCKET, SO_SNDBUF,
+                                            &buf_size, sizeof(buf_size));
+              SocketHelper::SetSocketOption(client_fd, SOL_SOCKET, SO_RCVBUF,
+                                            &buf_size, sizeof(buf_size));
+
+              NW_LOG_DEBUG("[Acceptor::AcceptLoop] 新连接 fd="
+                           << client_fd << " 准备分配给 Reactor");
+
+              // 将新连接分配给 Reactor
+              AssignToReactor(client_fd, peer_addr);
             }
+          }
         }
-    } // namespace network
+      }
+
+      // 停止监听 listen_fd（可能已经在 Stop() 中调用）
+      NW_LOG_DEBUG("[Acceptor::AcceptLoop] AcceptLoop 结束，停止监听 listen_fd="
+                   << listen_fd_);
+      if (io_monitor_)
+      {
+        io_monitor_->StopMonitor(listen_fd_);
+      }
+    }
+
+    void Acceptor::AssignToReactor(int fd, const sockaddr_storage &peer)
+    {
+      NW_LOG_TRACE("[Acceptor::AssignToReactor] 开始分配 fd=" << fd);
+
+      if (reactors_.empty())
+      {
+        // 如果没有配置 Reactor，无法处理此连接
+        NW_LOG_ERROR(
+            "[Acceptor::AssignToReactor] reactors_.empty()，关闭 fd=" << fd);
+        close(fd);
+        return;
+      }
+
+      // 使用轮询策略选择 Reactor
+      size_t index = next_reactor_index_.fetch_add(1) % reactors_.size();
+      NW_LOG_DEBUG("[Acceptor] reactors_.size="
+                   << reactors_.size() << ", 选择的 reactor_index=" << index);
+      auto reactor_weak = reactors_[index];
+
+      // 使用 lock() 获取 shared_ptr，必须检查是否有效
+      auto reactor = reactor_weak.lock();
+      if (!reactor)
+      {
+        // Reactor 已被销毁，无法处理此连接
+        NW_LOG_ERROR("[Acceptor::AssignToReactor] Reactor 无效，关闭 fd=" << fd);
+        close(fd);
+        return;
+      }
+
+      NW_LOG_DEBUG("[Acceptor] 将 fd=" << fd << " 添加到 Reactor (reactor_id="
+                                       << reactor->GetReactorId() << ")");
+
+      // 将 fd 添加到 Reactor（Reactor 内部会提交 kConnected 事件）
+      // 注意：AddConnection 现在是异步的，connection_id 将在 Reactor 线程中生成
+      bool success = reactor->AddConnection(fd, peer);
+      if (!success)
+      {
+        NW_LOG_ERROR(
+            "[Acceptor::AssignToReactor] Reactor::AddConnection 失败，关闭 fd="
+            << fd);
+        close(fd);
+      }
+      else
+      {
+        NW_LOG_DEBUG(
+            "[Acceptor] Reactor::AddConnection 成功，等待 kConnected 事件");
+      }
+    }
+  } // namespace network
 } // namespace darwincore
