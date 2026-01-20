@@ -34,6 +34,18 @@ enum class SocketProtocol {
   kUnixDomain     ///< Unix Domain Socket
 };
 
+inline const char* ToString(SocketProtocol proto)
+{
+    switch (proto)
+    {
+    case SocketProtocol::kIPv4:        return "IPv4";
+    case SocketProtocol::kIPv6:        return "IPv6";
+    case SocketProtocol::kUniversalIP: return "UniversalIP";
+    case SocketProtocol::kUnixDomain:  return "UnixDomain";
+    default:                           return "Unknown";
+    }
+}
+
 /**
  * @brief Socket 连接配置
  *

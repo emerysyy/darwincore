@@ -17,6 +17,9 @@
 #include <sys/socket.h>
 #include <sys/un.h>
 #include <unistd.h>
+#include <pthread.h>
+#include <chrono>
+
 
 #include "acceptor.h"
 #include "io_monitor.h"
@@ -24,7 +27,9 @@
 #include "socket_helper.h"
 #include <darwincore/network/configuration.h>
 #include <darwincore/network/logger.h>
-#include <pthread.h>
+
+using namespace std::chrono_literals;
+
 
 // SOMAXCONN 可能在某些系统上未定义
 #ifndef SOMAXCONN
@@ -133,7 +138,7 @@ namespace darwincore
       if (!io_monitor_->Initialize())
       {
         NW_LOG_ERROR("[Acceptor::ListenGeneric] io_monitor_ 初始化失败");
-        return false
+        return false;
       }
       
 
@@ -238,7 +243,7 @@ namespace darwincore
 
     void Acceptor::AcceptLoop()
     {
-      pthread_setname_np(("darwincore.network.acceptor" + std::to_string(protocol_)).c_str());
+      pthread_setname_np(("darwincore.network.acceptor" + std::string(ToString(protocol_))).c_str());
       NW_LOG_DEBUG("[Acceptor::AcceptLoop] AcceptLoop 启动，listen_fd=" << listen_fd_);
 
       if (!io_monitor_)
@@ -385,7 +390,8 @@ namespace darwincore
       // 使用轮询策略选择 Reactor
       size_t index = next_reactor_index_.fetch_add(1) % reactors_.size();
       NW_LOG_DEBUG("[Acceptor] reactors_.size="
-                   << reactors_.size() << ", 选择的 reactor_index=" << index);
+                   << reactors_.size() 
+                   << ", 选择的 reactor_index=" << index);
       auto reactor_weak = reactors_[index];
 
       // 使用 lock() 获取 shared_ptr，必须检查是否有效

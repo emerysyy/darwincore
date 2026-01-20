@@ -456,7 +456,7 @@ namespace darwincore
 
     void Reactor::RunEventLoop()
     {
-      pthread_setname_np(("darwincore.network.reactor." + std::to_string(reactor_id_)).c_str();
+      pthread_setname_np(("darwincore.network.reactor." + std::to_string(reactor_id_)).c_str());
       const int kEventBatchSize = SocketConfiguration::kDefaultEventBatchSize;
       auto last_timeout_check = std::chrono::steady_clock::now();
 
