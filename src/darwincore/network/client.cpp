@@ -94,8 +94,9 @@ namespace darwincore::network
     }
 
     worker_pool_->SetEventCallback(
-        [this](const NetworkEvent &ev)
-        { OnNetworkEvent(ev); });
+        [this](const NetworkEvent &ev) { 
+          OnNetworkEvent(ev); 
+        });
 
     reactor_ = std::make_unique<Reactor>(0, worker_pool_);
     return reactor_->Start();
