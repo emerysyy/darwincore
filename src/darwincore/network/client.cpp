@@ -13,7 +13,7 @@
 
 #include <darwincore/network/logger.h>
 #include "socket_helper.h"
-#include "reactor.h"
+#include "client_reactor.h"
 #include "worker_pool.h"
 #include <darwincore/network/client.h>
 
@@ -32,7 +32,9 @@ namespace darwincore::network
     bool GracefulShutdown(int timeout_ms);
     void Disconnect();
 
-    bool SendData(const uint8_t *, size_t);
+    bool SendData(const uint8_t *, size_t, int timeout_ms);
+    bool SendAsync(const uint8_t *, size_t, Client::SendAsyncCallback);
+    size_t GetSendBufferSize() const;
     bool IsConnected() const;
 
     void SetOnConnected(OnConnectedCallback cb) { on_connected_ = cb;}
@@ -50,7 +52,7 @@ namespace darwincore::network
     };
 
     // 发送背压水位标记（字节）
-    static constexpr size_t SEND_HIGH_WATER_MARK = 4 * 1024 * 1024;  // 4MB
+    static constexpr size_t SEND_HIGH_WATER_MARK = 8 * 1024 * 1024;  // 8MB（与SendBuffer一致）
 
     bool ConnectInternal(int fd, const sockaddr *, socklen_t, bool is_tcp);
     bool InitReactor();
@@ -60,7 +62,7 @@ namespace darwincore::network
 
   private:
     std::shared_ptr<WorkerPool> worker_pool_;
-    std::unique_ptr<Reactor> reactor_;
+    std::unique_ptr<ClientReactor> reactor_;
 
     std::atomic<uint64_t> connection_id_{0};
     std::atomic<State> state_{State::kDisconnected};
@@ -100,11 +102,11 @@ namespace darwincore::network
     }
 
     worker_pool_->SetEventCallback(
-        [this](const NetworkEvent &ev) { 
-          OnNetworkEvent(ev); 
+        [this](const NetworkEvent &ev) {
+          OnNetworkEvent(ev);
         });
 
-    reactor_ = std::make_unique<Reactor>(0, worker_pool_);
+    reactor_ = std::make_unique<ClientReactor>(worker_pool_);
     return reactor_->Start();
   }
 
@@ -146,7 +148,7 @@ namespace darwincore::network
       return false;
     }
 
-    bool success = reactor_->AddConnection(fd, peer_);
+    bool success = reactor_->SetConnection(fd, peer_);
     if (!success)
     {
       close(fd);
@@ -203,11 +205,10 @@ namespace darwincore::network
 
     // 等待SendBuffer清空
     auto start = std::chrono::steady_clock::now();
-    uint64_t conn_id = connection_id_.load();
 
     while (reactor_)
     {
-      size_t buffer_size = reactor_->GetSendBufferSize(conn_id);
+      size_t buffer_size = reactor_->GetSendBufferSize();
       if (buffer_size == 0)
       {
         NW_LOG_INFO("[Client] SendBuffer已清空，准备关闭连接");
@@ -261,13 +262,22 @@ namespace darwincore::network
     connection_id_.store(0);
   }
 
-  bool Client::Impl::SendData(const uint8_t *data, size_t size)
+  bool Client::Impl::SendData(const uint8_t *data, size_t size, int timeout_ms)
+  {
+    if (state_.load() != State::kConnected || !reactor_)
+      return false;
+
+    // ClientReactor 的 SendSync 会等待数据实际发送
+    return reactor_->SendSync(data, size, timeout_ms);
+  }
+
+  bool Client::Impl::SendAsync(const uint8_t *data, size_t size, Client::SendAsyncCallback callback)
   {
     if (state_.load() != State::kConnected || !reactor_)
       return false;
 
     // 发送背压检查：如果发送缓冲区超过高水位，拒绝发送
-    size_t buffer_size = reactor_->GetSendBufferSize(connection_id_.load());
+    size_t buffer_size = reactor_->GetSendBufferSize();
     if (buffer_size > SEND_HIGH_WATER_MARK)
     {
       NW_LOG_WARNING("[Client] 发送背压触发: buffer_size=" << buffer_size
@@ -275,7 +285,21 @@ namespace darwincore::network
       return false;
     }
 
-    return reactor_->SendData(connection_id_.load(), data, size);
+    // 使用 ClientReactor 的异步发送（带回调）
+    return reactor_->SendAsyncWithCallback(data, size,
+      [callback](bool success, size_t sent) {
+        if (callback) {
+          callback(success, sent);
+        }
+      });
+  }
+
+  size_t Client::Impl::GetSendBufferSize() const
+  {
+    if (state_.load() != State::kConnected || !reactor_)
+      return 0;
+
+    return reactor_->GetSendBufferSize();
   }
 
   bool Client::Impl::IsConnected() const
@@ -360,9 +384,17 @@ namespace darwincore::network
     return impl_->GracefulShutdown(timeout_ms);
   }
   void Client::Disconnect() { impl_->Disconnect(); }
-  bool Client::SendData(const uint8_t *d, size_t s)
+  bool Client::SendData(const uint8_t *d, size_t s, int t)
   {
-    return impl_->SendData(d, s);
+    return impl_->SendData(d, s, t);
+  }
+  bool Client::SendAsync(const uint8_t *d, size_t s, SendAsyncCallback cb)
+  {
+    return impl_->SendAsync(d, s, std::move(cb));
+  }
+  size_t Client::GetSendBufferSize() const
+  {
+    return impl_->GetSendBufferSize();
   }
   bool Client::IsConnected() const { return impl_->IsConnected(); }
   void Client::SetOnConnected(OnConnectedCallback cb)

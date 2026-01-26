@@ -30,7 +30,7 @@ else
   # Release 模式：支持 x86_64 和 arm64 双架构编译
   pushd build || exit
       cmake -DCMAKE_BUILD_TYPE=Debug -DCMAKE_OSX_ARCHITECTURES="x86_64;arm64" ..
-      make
+      make -j$(sysctl -n hw.ncpu)
       make install
 #      make package  # 可选：打包
   popd || exit

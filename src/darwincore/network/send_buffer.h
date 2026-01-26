@@ -166,10 +166,10 @@ namespace darwincore
       size_t write_pos_{0};         ///< 写位置
 
       // 常量配置
-      static constexpr size_t INITIAL_CAPACITY = 4096;           // 4KB 初始容量
-      static constexpr size_t HIGH_WATER_MARK = 4 * 1024 * 1024; // 4MB 高水位
-      static constexpr size_t LOW_WATER_MARK = 2 * 1024 * 1024;  // 2MB 低水位
-      static constexpr size_t MAX_CAPACITY = 16 * 1024 * 1024;   // 16MB 最大容量
+      static constexpr size_t INITIAL_CAPACITY = 4096;            // 4KB 初始容量
+      static constexpr size_t HIGH_WATER_MARK = 8 * 1024 * 1024;  // 8MB 高水位（提高背压阈值）
+      static constexpr size_t LOW_WATER_MARK = 4 * 1024 * 1024;   // 4MB 低水位
+      static constexpr size_t MAX_CAPACITY = 32 * 1024 * 1024;    // 32MB 最大容量
     };
 
   } // namespace network

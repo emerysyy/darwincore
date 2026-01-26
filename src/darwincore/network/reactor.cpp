@@ -20,6 +20,7 @@
 #include <errno.h>
 #include <unistd.h>
 #include <pthread.h>
+#include <sys/socket.h>
 
 #include "io_monitor.h"
 #include "reactor.h"
@@ -113,7 +114,18 @@ namespace darwincore
 
       NW_LOG_INFO("[Reactor" << reactor_id_ << "] 开始停止");
 
+      // 先通知停止，这样事件循环会退出
       pending_operations_.NotifyStop();
+
+      // 立即关闭所有连接的fd，加速断开
+      for (auto &[conn_id, conn] : connections_)
+      {
+        int fd = conn.file_descriptor;
+        if (fd >= 0)
+        {
+          shutdown(fd, SHUT_RDWR);
+        }
+      }
 
       if (event_loop_thread_.joinable())
       {
