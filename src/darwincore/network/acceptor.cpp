@@ -341,8 +341,8 @@ namespace darwincore
               SocketHelper::SetSocketOption(client_fd, IPPROTO_TCP, TCP_NODELAY,
                                             &flag, sizeof(flag));
 
-              // 设置发送/接收缓冲区大小 (64KB)
-              int buf_size = 64 * 1024;
+              // 设置发送/接收缓冲区大小 (2MB)
+              int buf_size = 2 * 1024 * 1024;
               SocketHelper::SetSocketOption(client_fd, SOL_SOCKET, SO_SNDBUF,
                                             &buf_size, sizeof(buf_size));
               SocketHelper::SetSocketOption(client_fd, SOL_SOCKET, SO_RCVBUF,

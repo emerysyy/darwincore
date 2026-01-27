@@ -11,11 +11,12 @@
 #include <chrono>
 #include <thread>
 
+#include <darwincore/network/client.h>
 #include <darwincore/network/logger.h>
 #include "socket_helper.h"
 #include "client_reactor.h"
 #include "worker_pool.h"
-#include <darwincore/network/client.h>
+
 
 namespace darwincore::network
 {
@@ -128,8 +129,13 @@ namespace darwincore::network
     if (is_tcp)
     {
       int flag = 1;
-      setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &flag, sizeof(flag));
-      setsockopt(fd, SOL_SOCKET, SO_KEEPALIVE, &flag, sizeof(flag));
+      SocketHelper::SetSocketOption(fd, IPPROTO_TCP, TCP_NODELAY, &flag, sizeof(flag));
+      SocketHelper::SetSocketOption(fd, SOL_SOCKET, SO_KEEPALIVE, &flag, sizeof(flag));
+
+      // 设置发送/接收缓冲区大小 (2MB)
+      int buf_size = 2 * 1024 * 1024;
+      SocketHelper::SetSocketOption(fd, SOL_SOCKET, SO_SNDBUF, &buf_size, sizeof(buf_size));
+      SocketHelper::SetSocketOption(fd, SOL_SOCKET, SO_RCVBUF, &buf_size, sizeof(buf_size));
     }
 
     if (connect(fd, addr, len) < 0 && errno != EINPROGRESS)
